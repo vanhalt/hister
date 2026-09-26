@@ -1,5 +1,6 @@
 import { fetchAPI, sendPageData, sendPDFData, sendResult } from '../modules/network';
 import { ensureDefaultServerURL } from '../modules/settings';
+import { getTabPageURL } from '../modules/tabs';
 
 void ensureDefaultServerURL();
 
@@ -142,6 +143,10 @@ function isURLSkipped(url: string, rules: IndexingRules): boolean {
   );
 }
 
+function isPageSkipped(url: string, sourceURL: string, rules: IndexingRules): boolean {
+  return isURLSkipped(url, rules) || isURLSkipped(sourceURL.split('#', 1)[0], rules);
+}
+
 async function getIndexingRules(
   serverURL: string,
   customHeaders: CustomHeader[],
@@ -253,10 +258,11 @@ async function updateTabIcon(tabId: number, url: string): Promise<void> {
     customHeaders.push({ name: 'X-Access-Token', value: data['histerToken'] });
   }
 
+  const pageURL = await getTabPageURL(tabId, url);
   if (data['indexingEnabled'] === false) {
     await setGreyIcon(tabId);
     if (showIndexedBadge && serverURL) {
-      const indexed = await isUrlPreviouslyIndexed(url, serverURL, customHeaders);
+      const indexed = await isUrlPreviouslyIndexed(pageURL, serverURL, customHeaders);
       if (indexed) setPreviouslyIndexedBadge(tabId);
     }
     return;
@@ -268,13 +274,13 @@ async function updateTabIcon(tabId: number, url: string): Promise<void> {
   }
 
   const rules = await getIndexingRules(serverURL, customHeaders);
-  if (isURLSkipped(url, rules)) {
+  if (isPageSkipped(pageURL, url, rules)) {
     await setGreyIcon(tabId);
   } else {
     setNormalIcon(tabId);
     clearBadge(tabId);
     if (showIndexedBadge) {
-      const indexed = await isUrlPreviouslyIndexed(url, serverURL, customHeaders);
+      const indexed = await isUrlPreviouslyIndexed(pageURL, serverURL, customHeaders);
       if (indexed) setPreviouslyIndexedBadge(tabId);
     }
   }
@@ -465,7 +471,8 @@ async function disableIndexingForCurrentTab(type: SkipRuleType): Promise<void> {
     if (!serverURL.endsWith('/')) {
       serverURL += '/';
     }
-    const pattern = type === 'url' ? buildUrlSkipPattern(tab.url) : buildDomainSkipPattern(tab.url);
+    const pageURL = await getTabPageURL(tab.id, tab.url);
+    const pattern = type === 'url' ? buildUrlSkipPattern(pageURL) : buildDomainSkipPattern(pageURL);
     await saveSkipRule(serverURL, getCustomHeaders(data), pattern);
     await setGreyIcon(tab.id);
     setPreviouslyIndexedBadge(tab.id);
@@ -543,7 +550,9 @@ function cjsMsgHandler(request, sender, sendResponse) {
         }
         const baseURL = u.endsWith('/') ? u : u + '/';
         getIndexingRules(baseURL, customHeaders).then((rules) => {
-          sendResponse({ isSkipped: isURLSkipped(request.url, rules) });
+          sendResponse({
+            isSkipped: isPageSkipped(request.url, request.sourceURL ?? request.url, rules),
+          });
         });
         return true;
       }
@@ -564,7 +573,8 @@ function cjsMsgHandler(request, sender, sendResponse) {
         chrome.storage.local.get(['histerLabel']).then(async (labelData) => {
           if (request.action !== 'reindex') {
             const rules = await getIndexingRules(u, customHeaders);
-            if (isURLSkipped(request.pageData.url, rules)) {
+            const sourceURL = sender.url ?? sender.tab.url ?? request.pageData.url;
+            if (isPageSkipped(request.pageData.url, sourceURL, rules)) {
               await setGreyIcon(sender.tab.id);
               sendResponse({ status: 'ok', status_code: 406 });
               return;

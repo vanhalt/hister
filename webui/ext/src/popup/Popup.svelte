@@ -12,6 +12,7 @@
   import { ModeWatcher, toggleMode, mode } from 'mode-watcher';
   import { fetchAPI, syncServerCookies } from '../modules/network';
   import { DEFAULT_SERVER_URL } from '../modules/settings';
+  import { getTabPageURL } from '../modules/tabs';
 
   let url = $state(DEFAULT_SERVER_URL);
   let accessToken = $state('');
@@ -25,6 +26,7 @@
   let showSettings = $state(false);
   let isPageSkipped = $state(false);
   let tabURL = $state('');
+  let sourceTabURL = $state('');
   let messageKey = $state(0); // to reappear message every time it is updated
   let pageLabel = $state('');
 
@@ -115,7 +117,7 @@
 
       checkAuth(url);
 
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
         if (!tabs?.length) return;
         const tab = tabs[0];
         chrome.action.getBadgeText({ tabId: tab.id! }, (badgeText) => {
@@ -125,8 +127,9 @@
         });
         const currentTabURL = tab.url;
         if (currentTabURL) {
-          tabURL = currentTabURL;
-          checkTabSkipRule(currentTabURL);
+          sourceTabURL = currentTabURL;
+          tabURL = await getTabPageURL(tab.id!, currentTabURL);
+          checkTabSkipRule(tabURL);
           chrome.runtime.sendMessage(
             { action: 'getTabState', tabId: tab.id, url: currentTabURL },
             (resp) => {
@@ -165,7 +168,11 @@
 
   async function checkTabSkipRule(tabURL: string) {
     try {
-      const response = await chrome.runtime.sendMessage({ action: 'checkSkipRule', url: tabURL });
+      const response = await chrome.runtime.sendMessage({
+        action: 'checkSkipRule',
+        url: tabURL,
+        sourceURL: sourceTabURL,
+      });
       isPageSkipped = response?.isSkipped === true;
     } catch (_) {}
   }
