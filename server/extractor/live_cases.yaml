@@ -342,6 +342,17 @@ cases:
         - Big Buck Bunny
       min_preview_length: 100
 
+  - name: contact_python_org_http
+    url: https://www.python.org/
+    backend: http
+    extractor: Contact
+    timeout: 20
+    run_chain: false
+    expect:
+      metadata_contains:
+        contacts:
+          - python
+
   - name: readability_wikipedia_article_http
     url: https://en.wikipedia.org/wiki/Web_scraping
     backend: http
