@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/asciimoo/hister/server/extractor/sdk"
 )
@@ -168,5 +169,107 @@ func TestSetConfigRejectsUnknownOption(t *testing.T) {
 	}
 	if err := e.SetConfig(&sdk.Config{Enable: true, Options: map[string]any{"max_images": 5}}); err != nil {
 		t.Errorf("valid option rejected: %v", err)
+	}
+	if err := e.SetConfig(&sdk.Config{Enable: true, Options: map[string]any{"max_concurrent_downloads": 2}}); err != nil {
+		t.Errorf("valid option rejected: %v", err)
+	}
+}
+
+func clientGalleryDoc(entries []imageEntry) *sdk.Document {
+	raw, _ := json.Marshal(entries)
+	return &sdk.Document{
+		URL:      "https://example.com/page",
+		Domain:   "example.com",
+		HTML:     `<html><body><img src="https://example.com/a.jpg" alt="A"></body></html>`,
+		Metadata: map[string]any{"images": string(raw)},
+	}
+}
+
+func TestExtractPrefersClientGalleryWithoutDownloads(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(tinyPNG)
+	}))
+	defer srv.Close()
+
+	uri := "data:image/png;base64," + base64.StdEncoding.EncodeToString(tinyPNG)
+	d := clientGalleryDoc([]imageEntry{{Alt: "Client image", DataURI: uri}})
+	// Point the HTML at the test server: any download would be counted.
+	d.HTML = fmt.Sprintf(`<html><body><img src="%s/a.jpg" alt="A"></body></html>`, srv.URL)
+	e := &ImagesExtractor{}
+	if res := e.ExtractContext(context.Background(), d); res.Decision() != sdk.ExtractorSuccess {
+		t.Fatalf("Extract decision = %v, err = %v", res.Decision(), res.Err())
+	}
+	if requests != 0 {
+		t.Errorf("client gallery should skip downloads, got %d requests", requests)
+	}
+	raw, _ := d.Metadata["images"].(string)
+	var entries []imageEntry
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		t.Fatalf("metadata is not valid JSON: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Alt != "Client image" {
+		t.Errorf("client gallery not preserved: %+v", entries)
+	}
+	if n, _ := d.Metadata["image_count"].(int); n != 1 {
+		t.Errorf("expected image_count 1, got %v", d.Metadata["image_count"])
+	}
+}
+
+func TestExtractRejectsInvalidClientGallery(t *testing.T) {
+	cases := map[string]string{
+		"remote URL":     `[{"alt":"x","data_uri":"https://example.com/a.jpg"}]`,
+		"not base64":     `[{"alt":"x","data_uri":"data:image/png;base64,!!!"}]`,
+		"not an image":   `[{"alt":"x","data_uri":"data:image/png;base64,` + base64.StdEncoding.EncodeToString([]byte("hello")) + `"}]`,
+		"malformed JSON": `not json`,
+		"empty array":    `[]`,
+	}
+	for name, raw := range cases {
+		d := &sdk.Document{
+			URL:      "https://example.com/page",
+			Domain:   "example.com",
+			HTML:     "<html><body>text only, no img tags</body></html>",
+			Metadata: map[string]any{"images": raw},
+		}
+		e := &ImagesExtractor{}
+		if res := e.Extract(d); res.Decision() != sdk.ExtractorFallback {
+			t.Errorf("%s: expected fallback, got %v", name, res.Decision())
+		}
+	}
+}
+
+func TestDownloadImagesConcurrentPreservesOrder(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(150 * time.Millisecond)
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(tinyPNG)
+	}))
+	defer srv.Close()
+
+	const n = 8
+	candidates := make([]imageCandidate, 0, n)
+	for i := range n {
+		candidates = append(candidates, imageCandidate{
+			url: fmt.Sprintf("%s/img%d.jpg", srv.URL, i),
+			alt: fmt.Sprintf("Image %d", i),
+		})
+	}
+	e := &ImagesExtractor{}
+	start := time.Now()
+	got := e.downloadImages(context.Background(), candidates)
+	elapsed := time.Since(start)
+	if len(got) != n {
+		t.Fatalf("expected %d images, got %d", n, len(got))
+	}
+	for i, entry := range got {
+		if entry.Alt != fmt.Sprintf("Image %d", i) {
+			t.Fatalf("order not preserved at %d: %+v", i, entry)
+		}
+	}
+	// Sequential would take n*150ms = 1.2s; six concurrent workers finish in ~2 waves.
+	if elapsed >= 1100*time.Millisecond {
+		t.Errorf("downloads look sequential: %d images took %v", n, elapsed)
 	}
 }

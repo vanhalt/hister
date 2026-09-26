@@ -22,6 +22,7 @@ function browser({
   rules = {},
   contentScript = true,
   indexingEnabled = true,
+  galleryEnabled = true,
   sourceURL = 'https://example.com/visited?tracking=true',
 } = {}) {
   const canonicalURL = 'https://example.com/clean';
@@ -33,6 +34,7 @@ function browser({
     histerURL: 'https://hister.example/',
     showIndexedBadge: true,
     indexingEnabled,
+    sendGalleryImages: galleryEnabled,
   };
   const event = { addListener() {} };
   const action = (_, callback) => callback?.();
@@ -40,6 +42,11 @@ function browser({
     URL,
     URLSearchParams,
     console,
+    Date,
+    setTimeout,
+    clearTimeout,
+    AbortController,
+    btoa,
     chrome: {
       runtime: {
         onMessage: { addListener: (fn) => (onMessage = fn) },
@@ -81,6 +88,15 @@ function browser({
       if (parsed.pathname === '/api/add') {
         documents.push(JSON.parse(options.body));
         return new Response('', { status: 201 });
+      }
+      if (parsed.pathname.startsWith('/gallery/')) {
+        if (parsed.pathname.endsWith('/missing.jpg')) {
+          return new Response('nope', { status: 404 });
+        }
+        return new Response(
+          new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]),
+          { headers: { 'content-type': 'image/png' } },
+        );
       }
       if (parsed.pathname === '/api/document') {
         lookups.push(parsed.searchParams.get('url'));
@@ -166,4 +182,32 @@ test('popup rule checks include both the visited and canonical URLs', async () =
     });
     assert.equal(response.isSkipped, true);
   }
+});
+
+test('gallery candidates are downloaded from cache and attached to the submission', async () => {
+  const b = browser();
+  const response = await b.message({
+    pageData: { url: b.canonicalURL, title: 'Article', text: 'Article text', faviconURL: '' },
+    imageCandidates: [
+      { url: 'https://example.com/gallery/a.jpg', alt: 'A' },
+      { url: 'https://example.com/gallery/missing.jpg', alt: 'Missing' },
+    ],
+  });
+  assert.equal(response.status_code, 201);
+  const metadata = b.documents[0].metadata;
+  const images = JSON.parse(metadata.images);
+  assert.equal(images.length, 1);
+  assert.equal(images[0].alt, 'A');
+  assert.ok(images[0].data_uri.startsWith('data:image/png;base64,'));
+  assert.equal(metadata.image_count, 1);
+});
+
+test('gallery downloads are skipped when disabled in settings', async () => {
+  const b = browser({ galleryEnabled: false });
+  const response = await b.message({
+    pageData: { url: b.canonicalURL, title: 'Article', text: 'Article text', faviconURL: '' },
+    imageCandidates: [{ url: 'https://example.com/gallery/a.jpg', alt: 'A' }],
+  });
+  assert.equal(response.status_code, 201);
+  assert.equal(b.documents[0].metadata, undefined);
 });

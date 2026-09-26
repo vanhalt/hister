@@ -1,4 +1,5 @@
 import { fetchAPI, sendPageData, sendPDFData, sendResult } from '../modules/network';
+import { downloadGalleryImages, type GalleryCandidate } from '../modules/gallery';
 import { ensureDefaultServerURL } from '../modules/settings';
 import { getTabPageURL } from '../modules/tabs';
 
@@ -145,6 +146,36 @@ function isURLSkipped(url: string, rules: IndexingRules): boolean {
 
 function isPageSkipped(url: string, sourceURL: string, rules: IndexingRules): boolean {
   return isURLSkipped(url, rules) || isURLSkipped(sourceURL.split('#', 1)[0], rules);
+}
+
+// Downloads the content script's gallery candidates from the warm browser
+// HTTP cache and attaches the full-size bytes to the submission metadata.
+// Best effort: failures never block the page submission, and the server
+// falls back to downloading the gallery itself when no gallery arrives.
+async function attachGalleryImages(
+  pageData: Record<string, unknown>,
+  candidates: unknown,
+): Promise<void> {
+  try {
+    if (!Array.isArray(candidates) || candidates.length === 0) return;
+    const store = await chrome.storage.local.get(['sendGalleryImages']);
+    if (store['sendGalleryImages'] === false) return;
+    const valid = (candidates as GalleryCandidate[]).filter(
+      (c) => c && typeof c.url === 'string' && typeof c.alt === 'string',
+    );
+    if (valid.length === 0) return;
+    const images = await downloadGalleryImages(valid);
+    if (images.length === 0) return;
+    const metadata =
+      pageData.metadata && typeof pageData.metadata === 'object'
+        ? { ...(pageData.metadata as Record<string, unknown>) }
+        : {};
+    metadata.images = JSON.stringify(images);
+    metadata.image_count = images.length;
+    pageData.metadata = metadata;
+  } catch {
+    // Gallery enrichment must never fail the submission.
+  }
 }
 
 async function getIndexingRules(
@@ -584,6 +615,7 @@ function cjsMsgHandler(request, sender, sendResponse) {
           if (request.action === 'reindex') {
             pageData.metadata = { ...pageData.metadata, ignore_skip_rules: true };
           }
+          await attachGalleryImages(pageData, request.imageCandidates);
           if (labelData['histerLabel']) {
             pageData.label = labelData['histerLabel'];
           }

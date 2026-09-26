@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -46,10 +47,11 @@ func (e *ImagesExtractor) Capabilities() sdk.Capabilities {
 
 func defaultOptions() map[string]any {
 	return map[string]any{
-		"download_images": true,
-		"image_timeout":   10,
-		"max_image_bytes": 1024 * 1024,
-		"max_images":      20,
+		"download_images":            true,
+		"image_timeout":              10,
+		"max_image_bytes":            1024 * 1024,
+		"max_images":                 20,
+		"max_concurrent_downloads":   6,
 	}
 }
 
@@ -63,7 +65,8 @@ func (e *ImagesExtractor) GetConfig() *sdk.Config {
 func (e *ImagesExtractor) SetConfig(c *sdk.Config) error {
 	for k := range c.Options {
 		switch k {
-		case "download_images", "image_timeout", "max_image_bytes", "max_images":
+		case "download_images", "image_timeout", "max_image_bytes", "max_images",
+			"max_concurrent_downloads":
 		default:
 			return fmt.Errorf("unknown option %q", k)
 		}
@@ -104,6 +107,21 @@ func (e *ImagesExtractor) maxImages() int {
 	return 20
 }
 
+func (e *ImagesExtractor) maxConcurrentDownloads() int {
+	if n := intOption(e.GetConfig().Options, "max_concurrent_downloads", 6); n > 0 {
+		return n
+	}
+	return 6
+}
+
+// sharedTransport is reused across documents so connections to hosts that
+// serve many gallery images (or many indexed pages) stay warm.
+var sharedTransport = &http.Transport{
+	MaxIdleConns:        64,
+	MaxIdleConnsPerHost: 16,
+	IdleConnTimeout:     90 * time.Second,
+}
+
 // imageEntry is a single downloaded gallery image. Only the base64 data URI
 // is persisted; the remote source URL is deliberately dropped so no remote
 // URLs leak into the index.
@@ -125,10 +143,21 @@ func (e *ImagesExtractor) Extract(d *sdk.Document) sdk.ExtractResult {
 	return e.ExtractContext(context.Background(), d)
 }
 
-// ExtractContext collects image URLs, downloads them, and stores data URIs.
+// ExtractContext prefers a client-supplied gallery (e.g. images already
+// downloaded by the browser extension and submitted with the document) and
+// falls back to downloading the gallery itself.
 func (e *ImagesExtractor) ExtractContext(ctx context.Context, d *sdk.Document) sdk.ExtractResult {
 	if err := ctx.Err(); err != nil {
 		return sdk.AbortExtraction(err)
+	}
+	if entries := e.clientGallery(d); len(entries) > 0 {
+		raw, err := json.Marshal(entries)
+		if err != nil {
+			return sdk.ExtractFallback(err)
+		}
+		d.AddMetadata("images", string(raw))
+		d.AddMetadata("image_count", len(entries))
+		return sdk.Extracted()
 	}
 	if !e.downloadEnabled() {
 		return sdk.ExtractFallback(fmt.Errorf("image downloads disabled"))
@@ -237,32 +266,113 @@ func firstSrcsetURL(srcset string) string {
 	return ""
 }
 
-// downloadImages fetches candidates and returns base64 data URIs.
-// Failures are skipped; an empty result is not fatal to the caller chain.
+// clientGallery validates a gallery submitted with the document (e.g. by
+// the browser extension, which downloads images from its warm cache) and
+// returns the normalized entries. Only full-size base64 data URIs are
+// accepted; remote URLs are rejected so no remote references leak into the
+// index. It returns nil when no usable client gallery is present, in which
+// case the caller falls back to server-side downloads.
+func (e *ImagesExtractor) clientGallery(d *sdk.Document) []imageEntry {
+	raw, ok := d.Metadata["images"]
+	if !ok {
+		return nil
+	}
+	var decoded []imageEntry
+	switch v := raw.(type) {
+	case string:
+		if v == "" {
+			return nil
+		}
+		if err := json.Unmarshal([]byte(v), &decoded); err != nil {
+			return nil
+		}
+	case []any:
+		data, err := json.Marshal(v)
+		if err != nil {
+			return nil
+		}
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			return nil
+		}
+	default:
+		return nil
+	}
+	maxBytes := e.maxImageBytes()
+	limit := e.maxImages()
+	out := make([]imageEntry, 0, len(decoded))
+	for _, entry := range decoded {
+		if len(out) >= limit {
+			break
+		}
+		alt := strings.TrimSpace(entry.Alt)
+		if len(alt) > 500 {
+			alt = alt[:500]
+		}
+		mime, payload, ok := strings.Cut(strings.TrimSpace(entry.DataURI), ",")
+		if !ok || !strings.HasPrefix(mime, "data:image/") || !strings.HasSuffix(mime, ";base64") {
+			continue
+		}
+		data, err := base64.StdEncoding.DecodeString(payload)
+		if err != nil || len(data) == 0 || len(data) > maxBytes {
+			continue
+		}
+		if sniffed := http.DetectContentType(data); !strings.HasPrefix(sniffed, "image/") {
+			continue
+		}
+		out = append(out, imageEntry{Alt: alt, DataURI: entry.DataURI})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// downloadImages fetches candidates concurrently with bounded parallelism
+// and returns base64 data URIs in candidate order. Failures are skipped; an
+// empty result is not fatal to the caller chain.
 func (e *ImagesExtractor) downloadImages(ctx context.Context, candidates []imageCandidate) []imageEntry {
 	maxBytes := e.maxImageBytes()
-	cli := &http.Client{Timeout: e.imageTimeout()}
+	cli := &http.Client{Transport: sharedTransport, Timeout: e.imageTimeout()}
+	slots := make([]imageEntry, len(candidates))
+	valid := make([]bool, len(candidates))
+	sem := make(chan struct{}, e.maxConcurrentDownloads())
+	var wg sync.WaitGroup
+loop:
+	for i, c := range candidates {
+		select {
+		case <-ctx.Done():
+			break loop
+		case sem <- struct{}{}:
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
+			if err != nil {
+				return
+			}
+			resp, err := cli.Do(req)
+			if err != nil {
+				return
+			}
+			data, contentType, ok := readImageBody(resp, maxBytes)
+			if !ok {
+				return
+			}
+			slots[i] = imageEntry{
+				Alt:     c.alt,
+				DataURI: fmt.Sprintf("data:%s;base64,%s", contentType, base64.StdEncoding.EncodeToString(data)),
+			}
+			valid[i] = true
+		}()
+	}
+	wg.Wait()
 	out := make([]imageEntry, 0, len(candidates))
-	for _, c := range candidates {
-		if err := ctx.Err(); err != nil {
-			return out
+	for i, entry := range slots {
+		if valid[i] {
+			out = append(out, entry)
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
-		if err != nil {
-			continue
-		}
-		resp, err := cli.Do(req)
-		if err != nil {
-			continue
-		}
-		data, contentType, ok := readImageBody(resp, maxBytes)
-		if !ok {
-			continue
-		}
-		out = append(out, imageEntry{
-			Alt:     c.alt,
-			DataURI: fmt.Sprintf("data:%s;base64,%s", contentType, base64.StdEncoding.EncodeToString(data)),
-		})
 	}
 	return out
 }
