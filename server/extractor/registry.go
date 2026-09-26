@@ -16,6 +16,7 @@ import (
 	"github.com/asciimoo/hister/server/extractor/extractors/github"
 	"github.com/asciimoo/hister/server/extractor/extractors/godoc"
 	"github.com/asciimoo/hister/server/extractor/extractors/hackernews"
+	"github.com/asciimoo/hister/server/extractor/extractors/images"
 	"github.com/asciimoo/hister/server/extractor/extractors/jsonld"
 	"github.com/asciimoo/hister/server/extractor/extractors/lobsters"
 	"github.com/asciimoo/hister/server/extractor/extractors/markdown"
@@ -66,6 +67,7 @@ func DefaultExtractors() []Extractor {
 		&github.GitHubExtractor{},
 		&lobsters.LobstersExtractor{},
 		&hackernews.HackerNewsExtractor{},
+		&images.ImagesExtractor{},
 		&wikipedia.WikipediaExtractor{},
 		&mastodon.MastodonExtractor{},
 		&bluesky.BlueskyExtractor{},

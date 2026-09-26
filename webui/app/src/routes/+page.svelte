@@ -90,6 +90,7 @@
     ExternalLink,
     History,
     FileText,
+    Image,
     Shield,
     Link2,
     Keyboard,
@@ -3083,6 +3084,14 @@
         <p class="font-inter text-text-brand-muted text-sm" role="status">Statistics unavailable</p>
       {/if}
     </div>
+    <a
+      href={`${base}/images`}
+      class="home-stat-pill home-stat-link text-hister-cyan shrink-0"
+      aria-label="Browse extracted images"
+    >
+      <Image class="size-3.5 md:size-4" />
+      <span class="font-inter text-text-brand-secondary text-sm">Images</span>
+    </a>
   </div>
 {/if}
 

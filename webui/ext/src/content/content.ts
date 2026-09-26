@@ -6,6 +6,7 @@ import {
   getPageURL,
   registerResultExtractor,
 } from '../modules/extract';
+import { collectGalleryCandidates, type GalleryCandidate } from '../modules/gallery';
 
 const minimumUpdateInterval = 30 * 1000;
 const maximumPollInterval = 5 * 60 * 1000;
@@ -97,9 +98,13 @@ function submit(
   lastSubmissionAt = Date.now();
   pollInterval = minimumUpdateInterval;
   const number = ++submissionNumber;
+  // Gallery candidates ride along so the background script can download the
+  // full-size bytes from its warm HTTP cache; the server prefers them over
+  // fetching the images itself.
+  const imageCandidates: GalleryCandidate[] = collectGalleryCandidates(document);
   const message = manual
-    ? { pageData: snapshot.data, action: 'reindex' }
-    : { pageData: snapshot.data };
+    ? { pageData: snapshot.data, imageCandidates, action: 'reindex' }
+    : { pageData: snapshot.data, imageCandidates };
   chrome.runtime.sendMessage(message, (response: SubmissionResponse | undefined) => {
     // A delayed reply must not mark a newer page or manual submission as skipped.
     if (number === submissionNumber) {

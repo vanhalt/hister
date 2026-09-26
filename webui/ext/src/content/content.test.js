@@ -551,3 +551,21 @@ test('unsupported content is never extracted, and manual indexing can override a
   errorPage.reindex();
   assert.equal(errorPage.messages.length, 1);
 });
+
+test('submissions include deduped gallery image candidates', () => {
+  const b = browser();
+  b.page.metadata = [
+    metadata('IMG', { src: '/a.jpg', alt: 'A' }),
+    metadata('IMG', { src: 'https://example.com/a.jpg', alt: 'duplicate' }),
+    metadata('IMG', { src: 'data:image/png;base64,xx', alt: 'inline' }),
+    metadata('IMG', { src: '/favicon.ico', alt: 'icon' }),
+    metadata('IMG', { src: '/pixel.gif', alt: 'tracker', width: '1', height: '1' }),
+    metadata('IMG', { srcset: '/r1.jpg 1x, /r2.jpg 2x', alt: 'Responsive' }),
+  ];
+  b.advance(0);
+  assert.equal(b.messages.length, 1);
+  assert.deepEqual(b.messages[0].request.imageCandidates, [
+    { url: 'https://example.com/a.jpg', alt: 'A' },
+    { url: 'https://example.com/r1.jpg', alt: 'Responsive' },
+  ]);
+});

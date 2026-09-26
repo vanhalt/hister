@@ -370,3 +370,14 @@ cases:
       text_contains:
         - documentation examples
       min_text_length: 100
+
+  - name: images_wikipedia_article_http
+    url: https://en.wikipedia.org/wiki/Big_Buck_Bunny
+    backend: http
+    extractor: Images
+    timeout: 30
+    run_chain: false
+    expect:
+      metadata_contains:
+        images:
+          - data:image/
