@@ -123,6 +123,51 @@ func TestReadabilityPreviewSanitizesMetaRefresh(t *testing.T) {
 	}
 }
 
+func TestReadabilityExtractFallsBackOnAppShell(t *testing.T) {
+	doc := &document.Document{
+		URL: "https://menu.fu.do/11-11container",
+		HTML: `<!doctype html>
+<html lang="es">
+  <head><meta charset="utf-8"><title>Menú Online</title><base href="/"></head>
+  <body><app-root></app-root><script src="main.js" type="module"></script></body>
+</html>`,
+	}
+
+	result := (&readabilityExtractor{}).Extract(doc)
+	if result.Decision() != sdk.ExtractorFallback {
+		t.Fatalf("decision = %v, want %v", result.Decision(), sdk.ExtractorFallback)
+	}
+	if err := result.Err(); err == nil || err.Error() != "no readable content found" {
+		t.Fatalf("fallback error = %v, want %q", err, "no readable content found")
+	}
+	if doc.Title != "Menú Online" {
+		t.Fatalf("title = %q, want %q", doc.Title, "Menú Online")
+	}
+
+	preview := (&readabilityExtractor{}).Preview(&document.Document{
+		URL:  "https://menu.fu.do/11-11container",
+		HTML: doc.HTML,
+	})
+	if preview.Decision() != sdk.ExtractorFallback {
+		t.Fatalf("preview decision = %v, want %v", preview.Decision(), sdk.ExtractorFallback)
+	}
+	if err := preview.Err(); err == nil || err.Error() != "no readable content found" {
+		t.Fatalf("preview fallback error = %v, want %q", err, "no readable content found")
+	}
+
+	chainDoc := &document.Document{
+		URL:  "https://menu.fu.do/11-11container",
+		HTML: doc.HTML,
+	}
+	registry := useExtractors(t, &readabilityExtractor{}, &basicExtractor{})
+	if err := registry.Extract(chainDoc); err != nil {
+		t.Fatalf("Extract failed: %v", err)
+	}
+	if chainDoc.Title != "Menú Online" {
+		t.Fatalf("chained title = %q, want %q", chainDoc.Title, "Menú Online")
+	}
+}
+
 func TestBasicPreviewEscapesMarkup(t *testing.T) {
 	doc := &document.Document{
 		Text: `<p>safe text</p><meta http-equiv="refresh" content="0; url=EEx.html">`,

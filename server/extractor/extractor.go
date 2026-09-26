@@ -430,17 +430,35 @@ func (e *readabilityExtractor) Extract(d *sdk.Document) sdk.ExtractResult {
 	if err != nil {
 		return sdk.ExtractFallback(err)
 	}
+	if a.Node == nil {
+		applyReadabilityTitleMeta(d, a)
+		return sdk.ExtractFallback(errors.New("no readable content found"))
+	}
 	buf := bytes.NewBuffer(nil)
 	if err := a.RenderText(buf); err != nil {
+		applyReadabilityTitleMeta(d, a)
 		return sdk.ExtractFallback(err)
 	}
 	d.Text = buf.String()
+	if strings.TrimSpace(d.Text) == "" {
+		applyReadabilityTitleMeta(d, a)
+		return sdk.ExtractFallback(errors.New("no readable content found"))
+	}
+	applyReadabilityTitleMeta(d, a)
+	return sdk.Extracted()
+}
+
+// applyReadabilityTitleMeta copies the title, favicon, and parsed metadata
+// from a readability article onto d. It is applied on both success and
+// fallback paths so a document that has a title but no readable body (for
+// example a client-rendered app shell) still keeps its title when the chain
+// falls through to the next extractor.
+func applyReadabilityTitleMeta(d *sdk.Document, a readability.Article) {
 	if t := a.Title(); t != "" {
 		d.Title = t
 	}
 	d.SetFaviconURL(a.Favicon())
 	writeReadabilityMeta(d, a)
-	return sdk.Extracted()
 }
 
 // writeReadabilityMeta copies the rich fields readability already parsed
@@ -479,6 +497,9 @@ func (e *readabilityExtractor) Preview(d *sdk.Document) sdk.PreviewResult {
 	a, err := readability.FromReader(r, u)
 	if err != nil {
 		return sdk.PreviewFallback(err)
+	}
+	if a.Node == nil {
+		return sdk.PreviewFallback(errors.New("no readable content found"))
 	}
 	var htmlContent strings.Builder
 	if err := a.RenderHTML(&htmlContent); err != nil {
