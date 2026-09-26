@@ -28,6 +28,7 @@ function browser({
   const canonicalURL = 'https://example.com/clean';
   const documents = [];
   const lookups = [];
+  const uploads = { needed: [], items: [] };
   let onMessage;
   let onActivated;
   const storage = {
@@ -47,6 +48,8 @@ function browser({
     clearTimeout,
     AbortController,
     btoa,
+    atob,
+    crypto,
     chrome: {
       runtime: {
         onMessage: { addListener: (fn) => (onMessage = fn) },
@@ -89,12 +92,23 @@ function browser({
         documents.push(JSON.parse(options.body));
         return new Response('', { status: 201 });
       }
+      if (parsed.pathname === '/api/image/needed') {
+        const { hashes } = JSON.parse(options.body);
+        uploads.needed.push(hashes);
+        return Response.json({ needed: hashes });
+      }
+      if (parsed.pathname === '/api/image') {
+        uploads.items.push(JSON.parse(options.body));
+        return Response.json({ key: 'k', merged: true });
+      }
       if (parsed.pathname.startsWith('/gallery/')) {
         if (parsed.pathname.endsWith('/missing.jpg')) {
           return new Response('nope', { status: 404 });
         }
+        const match = parsed.pathname.match(/img(\d+)\.jpg$/);
+        const variant = match ? Number(match[1]) % 256 : 0;
         return new Response(
-          new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]),
+          new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, variant, 0x00]),
           { headers: { 'content-type': 'image/png' } },
         );
       }
@@ -114,6 +128,7 @@ function browser({
     canonicalURL,
     documents,
     lookups,
+    uploads,
     message,
     activate: () => onActivated({ tabId: 1 }),
     submit: (manual = false) =>
@@ -184,7 +199,7 @@ test('popup rule checks include both the visited and canonical URLs', async () =
   }
 });
 
-test('gallery candidates are downloaded from cache and attached to the submission', async () => {
+test('gallery candidates submit a manifest and stream uploads in the background', async () => {
   const b = browser();
   const response = await b.message({
     pageData: { url: b.canonicalURL, title: 'Article', text: 'Article text', faviconURL: '' },
@@ -194,12 +209,21 @@ test('gallery candidates are downloaded from cache and attached to the submissio
     ],
   });
   assert.equal(response.status_code, 201);
+  // The page submission carries only the lightweight manifest, never bytes.
   const metadata = b.documents[0].metadata;
-  const images = JSON.parse(metadata.images);
-  assert.equal(images.length, 1);
-  assert.equal(images[0].alt, 'A');
-  assert.ok(images[0].data_uri.startsWith('data:image/png;base64,'));
+  const manifest = JSON.parse(metadata.images);
+  assert.equal(manifest.length, 1);
+  assert.equal(manifest[0].alt, 'A');
+  assert.match(manifest[0].hash, /^[0-9a-f]{64}$/);
   assert.equal(metadata.image_count, 1);
+  // Uploads stream one by one after the page submission resolves.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(b.uploads.needed, [[manifest[0].hash]]);
+  assert.equal(b.uploads.items.length, 1);
+  assert.equal(b.uploads.items[0].url, b.canonicalURL);
+  assert.equal(b.uploads.items[0].alt, 'A');
+  assert.equal(b.uploads.items[0].hash, manifest[0].hash);
+  assert.ok(b.uploads.items[0].data_uri.startsWith('data:image/png;base64,'));
 });
 
 test('gallery downloads are skipped when disabled in settings', async () => {
@@ -210,4 +234,20 @@ test('gallery downloads are skipped when disabled in settings', async () => {
   });
   assert.equal(response.status_code, 201);
   assert.equal(b.documents[0].metadata, undefined);
+});
+
+test('gallery downloads have no count cap', async () => {
+  const b = browser();
+  const candidates = Array.from(
+    { length: 25 },
+    (_, i) => ({ url: `https://example.com/gallery/img${i}.jpg`, alt: `Image ${i}` }),
+  );
+  const response = await b.message({
+    pageData: { url: b.canonicalURL, title: 'Article', text: 'Article text', faviconURL: '' },
+    imageCandidates: candidates,
+  });
+  assert.equal(response.status_code, 201);
+  const images = JSON.parse(b.documents[0].metadata.images);
+  assert.equal(images.length, 25);
+  assert.equal(images[24].alt, 'Image 24');
 });

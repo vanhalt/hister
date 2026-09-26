@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ImageItem } from '$lib/images';
+  import { imageSrc, type ImageItem } from '$lib/images';
 
   interface Props {
     items: ImageItem[];
@@ -9,7 +9,8 @@
 </script>
 
 <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-  {#each items as item (`${item.pageUrl}#${item.dataUri.slice(-32)}`)}
+  {#each items as item, i (`${item.pageUrl}#${i}`)}
+    {@const src = imageSrc(item)}
     <figure
       class="border-brutal-border bg-card-surface flex flex-col gap-2 border-[3px] p-2 shadow-[3px_3px_0_var(--brutal-shadow)]"
     >
@@ -20,12 +21,18 @@
         class="bg-muted-surface flex aspect-square items-center justify-center overflow-hidden"
         title={item.alt || item.pageTitle}
       >
-        <img
-          src={item.dataUri}
-          alt={item.alt || item.pageTitle}
-          loading="lazy"
-          class="h-full w-full object-cover"
-        />
+        {#if src}
+          <img
+            {src}
+            alt={item.alt || item.pageTitle}
+            loading="lazy"
+            class="h-full w-full object-cover"
+          />
+        {:else}
+          <span class="font-inter text-text-brand-muted px-2 text-center text-xs">
+            Image upload pending
+          </span>
+        {/if}
       </a>
       {#if item.alt}
         <figcaption class="font-inter text-text-brand line-clamp-2 text-sm font-semibold">

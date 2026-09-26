@@ -12,7 +12,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	stdhtml "html"
 	"io"
 	"net/http"
 	"net/url"
@@ -24,7 +23,6 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/asciimoo/hister/server/extractor/sdk"
-	"github.com/asciimoo/hister/server/sanitizer"
 )
 
 // ImagesExtractor scans HTML for image galleries and stores downloaded images
@@ -38,7 +36,7 @@ var _ sdk.Extractor = (*ImagesExtractor)(nil)
 func (e *ImagesExtractor) Name() string { return "Images" }
 
 func (e *ImagesExtractor) Description() string {
-	return "Downloads the image gallery of a web page and stores images as base64 data URIs in document metadata."
+	return "Downloads the image gallery of a web page and stores images in the content-addressed image store, referenced by key from document metadata."
 }
 
 func (e *ImagesExtractor) Capabilities() sdk.Capabilities {
@@ -47,11 +45,11 @@ func (e *ImagesExtractor) Capabilities() sdk.Capabilities {
 
 func defaultOptions() map[string]any {
 	return map[string]any{
-		"download_images":            true,
-		"image_timeout":              10,
-		"max_image_bytes":            1024 * 1024,
-		"max_images":                 20,
-		"max_concurrent_downloads":   6,
+		"download_images":          true,
+		"image_timeout":            10,
+		"max_image_bytes":          0,
+		"max_images":               0,
+		"max_concurrent_downloads": 6,
 	}
 }
 
@@ -96,15 +94,16 @@ func (e *ImagesExtractor) imageTimeout() time.Duration {
 	return time.Duration(intOption(e.GetConfig().Options, "image_timeout", 10)) * time.Second
 }
 
+// maxImageBytes returns the per-image download cap. Zero means uncapped;
+// readImageBody always applies a hard 1 GiB safety ceiling so a hostile
+// origin cannot exhaust memory regardless of configuration.
 func (e *ImagesExtractor) maxImageBytes() int {
-	return intOption(e.GetConfig().Options, "max_image_bytes", 1024*1024)
+	return intOption(e.GetConfig().Options, "max_image_bytes", 0)
 }
 
 func (e *ImagesExtractor) maxImages() int {
-	if n := intOption(e.GetConfig().Options, "max_images", 20); n > 0 {
-		return n
-	}
-	return 20
+	// Zero or negative means no cap: every gallery image is indexed.
+	return intOption(e.GetConfig().Options, "max_images", 0)
 }
 
 func (e *ImagesExtractor) maxConcurrentDownloads() int {
@@ -122,12 +121,30 @@ var sharedTransport = &http.Transport{
 	IdleConnTimeout:     90 * time.Second,
 }
 
-// imageEntry is a single downloaded gallery image. Only the base64 data URI
-// is persisted; the remote source URL is deliberately dropped so no remote
-// URLs leak into the index.
+// imageEntry is a single gallery image. Key addresses bytes in the
+// content-addressed image store, Hash is a not-yet-uploaded client image,
+// and DataURI is a legacy or freshly submitted inline image converted to a
+// key before indexing. The remote source URL is deliberately never
+// persisted.
 type imageEntry struct {
 	Alt     string `json:"alt,omitempty"`
-	DataURI string `json:"data_uri"`
+	Key     string `json:"key,omitempty"`
+	Hash    string `json:"hash,omitempty"`
+	DataURI string `json:"data_uri,omitempty"`
+}
+
+// validEntryKey reports whether s looks like a SHA-256 content key or hash.
+func validEntryKey(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // Match returns true when the raw HTML plausibly contains an image gallery.
@@ -297,23 +314,38 @@ func (e *ImagesExtractor) clientGallery(d *sdk.Document) []imageEntry {
 	default:
 		return nil
 	}
-	maxBytes := e.maxImageBytes()
 	limit := e.maxImages()
 	out := make([]imageEntry, 0, len(decoded))
 	for _, entry := range decoded {
-		if len(out) >= limit {
+		if limit > 0 && len(out) >= limit {
 			break
 		}
 		alt := strings.TrimSpace(entry.Alt)
 		if len(alt) > 500 {
 			alt = alt[:500]
 		}
+		// Content-addressed and pending entries pass through with format
+		// validation; sizes are uncapped by design.
+		if entry.DataURI == "" {
+			entry.Alt = alt
+			if entry.Key != "" && !validEntryKey(entry.Key) {
+				entry.Key = ""
+			}
+			if entry.Hash != "" && !validEntryKey(entry.Hash) {
+				entry.Hash = ""
+			}
+			if entry.Key == "" && entry.Hash == "" {
+				continue
+			}
+			out = append(out, entry)
+			continue
+		}
 		mime, payload, ok := strings.Cut(strings.TrimSpace(entry.DataURI), ",")
 		if !ok || !strings.HasPrefix(mime, "data:image/") || !strings.HasSuffix(mime, ";base64") {
 			continue
 		}
 		data, err := base64.StdEncoding.DecodeString(payload)
-		if err != nil || len(data) == 0 || len(data) > maxBytes {
+		if err != nil || len(data) == 0 {
 			continue
 		}
 		if sniffed := http.DetectContentType(data); !strings.HasPrefix(sniffed, "image/") {
@@ -377,6 +409,12 @@ loop:
 	return out
 }
 
+// maxDownloadBytes is the hard safety ceiling for a single server-side
+// image download. Configured max_image_bytes values above it still apply,
+// but an uncapped configuration (0) cannot be turned into unbounded memory
+// use by a hostile origin.
+const maxDownloadBytes = 1 << 30
+
 func readImageBody(resp *http.Response, maxBytes int) ([]byte, string, bool) {
 	defer func() {
 		if cerr := resp.Body.Close(); cerr != nil {
@@ -386,8 +424,12 @@ func readImageBody(resp *http.Response, maxBytes int) ([]byte, string, bool) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", false
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes)+1))
-	if err != nil || len(data) == 0 || len(data) > maxBytes {
+	limit := maxBytes
+	if limit <= 0 || limit > maxDownloadBytes {
+		limit = maxDownloadBytes
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
+	if err != nil || len(data) == 0 || len(data) > limit {
 		return nil, "", false
 	}
 	sniffed := http.DetectContentType(data)
@@ -399,8 +441,20 @@ func readImageBody(resp *http.Response, maxBytes int) ([]byte, string, bool) {
 
 // galleryEntries decodes d.Metadata["images"] into entries.
 func galleryEntries(d *sdk.Document) []imageEntry {
-	raw, ok := d.Metadata["images"].(string)
-	if !ok || raw == "" {
+	var raw string
+	switch v := d.Metadata["images"].(type) {
+	case string:
+		raw = v
+	case []any:
+		data, err := json.Marshal(v)
+		if err != nil {
+			return nil
+		}
+		raw = string(data)
+	default:
+		return nil
+	}
+	if raw == "" {
 		return nil
 	}
 	var entries []imageEntry
@@ -409,14 +463,27 @@ func galleryEntries(d *sdk.Document) []imageEntry {
 	}
 	filtered := entries[:0]
 	for _, img := range entries {
-		if strings.HasPrefix(img.DataURI, "data:image/") {
+		switch {
+		case img.Key != "" && validEntryKey(img.Key),
+			img.Hash != "" && validEntryKey(img.Hash),
+			strings.HasPrefix(img.DataURI, "data:image/"):
 			filtered = append(filtered, img)
 		}
 	}
 	return filtered
 }
 
-// Preview renders a sanitized gallery grid of the stored data URIs.
+// galleryPreviewItem is the frontend GalleryPreview template payload. Image
+// locations stay as content keys so the front end resolves them against its
+// own base path; only legacy inline entries carry data URIs.
+type galleryPreviewItem struct {
+	Alt     string `json:"alt,omitempty"`
+	Key     string `json:"key,omitempty"`
+	Hash    string `json:"hash,omitempty"`
+	DataURI string `json:"data_uri,omitempty"`
+}
+
+// Preview renders the gallery via the "gallery" front-end template.
 func (e *ImagesExtractor) Preview(d *sdk.Document) sdk.PreviewResult {
 	return e.PreviewContext(context.Background(), d)
 }
@@ -430,21 +497,18 @@ func (e *ImagesExtractor) PreviewContext(ctx context.Context, d *sdk.Document) s
 	if len(entries) == 0 {
 		return sdk.PreviewFallback(fmt.Errorf("no gallery images"))
 	}
-	var b strings.Builder
-	b.WriteString(`<div class="hister-gallery">`)
+	items := make([]galleryPreviewItem, 0, len(entries))
 	for _, img := range entries {
-		b.WriteString(`<figure class="hister-gallery-item"><img src="`)
-		b.WriteString(img.DataURI)
-		b.WriteString(`" alt="`)
-		b.WriteString(stdhtml.EscapeString(img.Alt))
-		b.WriteString(`" loading="lazy">`)
-		if img.Alt != "" {
-			b.WriteString(`<figcaption>`)
-			b.WriteString(stdhtml.EscapeString(img.Alt))
-			b.WriteString(`</figcaption>`)
-		}
-		b.WriteString(`</figure>`)
+		items = append(items, galleryPreviewItem{
+			Alt:     img.Alt,
+			Key:     img.Key,
+			Hash:    img.Hash,
+			DataURI: img.DataURI,
+		})
 	}
-	b.WriteString(`</div>`)
-	return sdk.Previewed(sdk.PreviewResponse{Content: sanitizer.SanitizeHTML(b.String())})
+	raw, err := json.Marshal(items)
+	if err != nil {
+		return sdk.PreviewFallback(err)
+	}
+	return sdk.Previewed(sdk.PreviewResponse{Content: string(raw), Template: "gallery"})
 }

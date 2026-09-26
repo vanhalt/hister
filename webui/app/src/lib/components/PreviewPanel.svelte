@@ -2,6 +2,7 @@
 <script lang="ts">
   import VideoPreview from './VideoPreview.svelte';
   import ContactPreview from './ContactPreview.svelte';
+  import GalleryPreview, { type GalleryPreviewItem } from './GalleryPreview.svelte';
   import { apiFetch } from '$lib/api';
   import {
     buildPreviewUrl,
@@ -238,8 +239,12 @@
       } else {
         const data = (await resp.json()) as DocumentPreviewResponse;
         template = data.template || '';
-        templateData = template === 'video' ? parseTemplateData(data.content) : null;
-        content = template === 'video' ? '' : data.content || '<p>No content available</p>';
+        templateData =
+          template === 'video' || template === 'gallery' ? parseTemplateData(data.content) : null;
+        content =
+          template === 'video' || template === 'gallery'
+            ? ''
+            : data.content || '<p>No content available</p>';
         // Always update metadata (server always returns current doc's metadata regardless of version).
         title = data.title || hint;
         added = data.added ?? null;
@@ -677,6 +682,8 @@
           {/if}
           {#if template === 'video' && templateData}
             <VideoPreview data={templateData} />
+          {:else if template === 'gallery' && Array.isArray(templateData)}
+            <GalleryPreview items={templateData as GalleryPreviewItem[]} />
           {:else}
             {@html content}
           {/if}

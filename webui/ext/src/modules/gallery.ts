@@ -13,11 +13,14 @@ export interface GalleryImage {
   data_uri: string;
 }
 
-export const GALLERY_MAX_IMAGES = 20;
-export const GALLERY_MAX_IMAGE_BYTES = 1024 * 1024;
+// GALLERY_MAX_IMAGES of 0 means no cap: every gallery image is indexed.
+export const GALLERY_MAX_IMAGES = 0;
+export const GALLERY_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const GALLERY_CONCURRENCY = 4;
 const GALLERY_IMAGE_TIMEOUT_MS = 8000;
-const GALLERY_BUDGET_MS = 20000;
+// Overall budget bounds submission delay, not image count: workers stop
+// launching new downloads after this, in-flight ones still finish.
+const GALLERY_BUDGET_MS = 120000;
 
 const SKIP_MARKERS = ['favicon', 'sprite', 'pixel', 'tracking', '1x1', '.svg'];
 
@@ -76,7 +79,8 @@ export function collectGalleryCandidates(
     const content = attr(el, 'content');
     if (content) add(content, '');
   });
-  return out.slice(0, limit);
+  if (limit > 0) return out.slice(0, limit);
+  return out;
 }
 
 function sniffImageMime(bytes: Uint8Array): string {
@@ -98,8 +102,7 @@ function sniffImageMime(bytes: Uint8Array): string {
   return '';
 }
 
-function arrayBufferToBase64(bytes: Uint8Array): string {
-  let binary = '';
+function arrayBufferToBase64(bytes: Uint8Array): string {  let binary = '';
   const CHUNK = 0x8000;
   for (let i = 0; i < bytes.length; i += CHUNK) {
     binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
@@ -193,7 +196,7 @@ export async function downloadGalleryImages(
     timeoutMs = GALLERY_IMAGE_TIMEOUT_MS,
     budgetMs = GALLERY_BUDGET_MS,
   } = options;
-  const queue = candidates.slice(0, maxImages);
+  const queue = maxImages > 0 ? candidates.slice(0, maxImages) : candidates.slice();
   const slots: (GalleryImage | null)[] = new Array(queue.length).fill(null);
   const deadline = Date.now() + budgetMs;
   let next = 0;
@@ -210,4 +213,21 @@ export async function downloadGalleryImages(
   );
   await Promise.all(workers);
   return slots.filter((entry): entry is GalleryImage => entry !== null);
+}
+
+/** SHA-256 hex of the raw bytes behind a data URI. Empty on any failure. */
+export async function sha256Hex(dataUri: string): Promise<string> {
+  try {
+    const payload = dataUri.split(',', 2)[1];
+    if (!payload) return '';
+    const binary = atob(payload);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  } catch {
+    return '';
+  }
 }

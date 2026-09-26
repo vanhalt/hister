@@ -1,5 +1,5 @@
 import { fetchAPI, sendPageData, sendPDFData, sendResult } from '../modules/network';
-import { downloadGalleryImages, type GalleryCandidate } from '../modules/gallery';
+import { downloadGalleryImages, sha256Hex, type GalleryCandidate } from '../modules/gallery';
 import { ensureDefaultServerURL } from '../modules/settings';
 import { getTabPageURL } from '../modules/tabs';
 
@@ -149,33 +149,92 @@ function isPageSkipped(url: string, sourceURL: string, rules: IndexingRules): bo
 }
 
 // Downloads the content script's gallery candidates from the warm browser
-// HTTP cache and attaches the full-size bytes to the submission metadata.
-// Best effort: failures never block the page submission, and the server
-// falls back to downloading the gallery itself when no gallery arrives.
-async function attachGalleryImages(
-  pageData: Record<string, unknown>,
+// HTTP cache and prepares a two-phase upload: the page submission carries
+// only the lightweight manifest ([{alt, hash}]), then the images themselves
+// stream up one by one in the background. Returns null when there is nothing
+// to upload. Failures never block the page submission.
+async function prepareGalleryUpload(
   candidates: unknown,
-): Promise<void> {
+): Promise<{ manifest: { alt: string; hash: string }[]; uploads: Map<string, { alt: string; data_uri: string }> } | null> {
   try {
-    if (!Array.isArray(candidates) || candidates.length === 0) return;
+    if (!Array.isArray(candidates) || candidates.length === 0) return null;
     const store = await chrome.storage.local.get(['sendGalleryImages']);
-    if (store['sendGalleryImages'] === false) return;
+    if (store['sendGalleryImages'] === false) return null;
     const valid = (candidates as GalleryCandidate[]).filter(
       (c) => c && typeof c.url === 'string' && typeof c.alt === 'string',
     );
-    if (valid.length === 0) return;
+    if (valid.length === 0) return null;
     const images = await downloadGalleryImages(valid);
-    if (images.length === 0) return;
-    const metadata =
-      pageData.metadata && typeof pageData.metadata === 'object'
-        ? { ...(pageData.metadata as Record<string, unknown>) }
-        : {};
-    metadata.images = JSON.stringify(images);
-    metadata.image_count = images.length;
-    pageData.metadata = metadata;
+    if (images.length === 0) return null;
+    const manifest: { alt: string; hash: string }[] = [];
+    const uploads = new Map<string, { alt: string; data_uri: string }>();
+    for (const image of images) {
+      const hash = await sha256Hex(image.data_uri);
+      if (!hash || uploads.has(hash)) continue;
+      uploads.set(hash, { alt: image.alt, data_uri: image.data_uri });
+      manifest.push({ alt: image.alt, hash });
+    }
+    if (manifest.length === 0) return null;
+    return { manifest, uploads };
   } catch {
     // Gallery enrichment must never fail the submission.
+    return null;
   }
+}
+
+// Attaches a gallery manifest to the page submission metadata.
+function attachGalleryManifest(
+  pageData: Record<string, unknown>,
+  manifest: { alt: string; hash: string }[],
+): void {
+  const metadata =
+    pageData.metadata && typeof pageData.metadata === 'object'
+      ? { ...(pageData.metadata as Record<string, unknown>) }
+      : {};
+  metadata.images = JSON.stringify(manifest);
+  metadata.image_count = manifest.length;
+  pageData.metadata = metadata;
+}
+
+// Streams pending gallery images to the server one by one in the background:
+// first ask which hashes are missing, then upload only those. Fire-and-forget
+// by design; failures fall back to server-side downloads.
+function uploadGalleryImages(
+  baseURL: string,
+  pageUrl: string,
+  pending: Map<string, { alt: string; data_uri: string }>,
+  customHeaders: CustomHeader[],
+): void {
+  (async () => {
+    try {
+      const hashes = [...pending.keys()];
+      const neededResp = await fetchAPI(`${baseURL}api/image/needed`, {
+        body: { hashes },
+        customHeaders,
+      });
+      if (!neededResp.ok) return;
+      const neededJson = (await neededResp.json()) as { needed?: unknown };
+      const needed = Array.isArray(neededJson.needed)
+        ? (neededJson.needed as unknown[]).filter(
+            (h): h is string => typeof h === 'string' && pending.has(h),
+          )
+        : hashes;
+      for (const hash of needed) {
+        const upload = pending.get(hash);
+        if (!upload) continue;
+        try {
+          await fetchAPI(`${baseURL}api/image`, {
+            body: { url: pageUrl, alt: upload.alt, hash, data_uri: upload.data_uri },
+            customHeaders,
+          });
+        } catch {
+          // Per-image failures must not stop the remaining uploads.
+        }
+      }
+    } catch {
+      // Gallery upload must never surface errors.
+    }
+  })();
 }
 
 async function getIndexingRules(
@@ -615,7 +674,8 @@ function cjsMsgHandler(request, sender, sendResponse) {
           if (request.action === 'reindex') {
             pageData.metadata = { ...pageData.metadata, ignore_skip_rules: true };
           }
-          await attachGalleryImages(pageData, request.imageCandidates);
+          const pendingGallery = await prepareGalleryUpload(request.imageCandidates);
+          if (pendingGallery) attachGalleryManifest(pageData, pendingGallery.manifest);
           if (labelData['histerLabel']) {
             pageData.label = labelData['histerLabel'];
           }
@@ -623,6 +683,14 @@ function cjsMsgHandler(request, sender, sendResponse) {
             .then((r) => {
               if (r.status === 201) {
                 setNormalIcon(sender.tab.id);
+                if (pendingGallery) {
+                  uploadGalleryImages(
+                    u,
+                    request.pageData.url,
+                    pendingGallery.uploads,
+                    getDocumentSubmissionHeaders(data),
+                  );
+                }
                 if (showIndexedBadge) {
                   setPreviouslyIndexedBadge(sender.tab.id);
                 } else {

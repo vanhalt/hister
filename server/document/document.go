@@ -36,6 +36,10 @@ type Document struct {
 	Text       string         `json:"text"`
 	Favicon    string         `json:"favicon"`
 	FaviconKey string         `json:"favicon_key"`
+	// ImageKeys holds content-addressed keys for gallery images stored under
+	// the indexer's image data subdir. It mirrors the gallery manifest in
+	// Metadata["images"] so orphaned blobs can be reference counted.
+	ImageKeys []string       `json:"image_keys,omitempty"`
 	Score      float64        `json:"score"`
 	Added      int64          `json:"added"`
 	Updated    int64          `json:"updated"`

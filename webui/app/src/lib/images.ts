@@ -7,12 +7,24 @@ export interface ImageItem {
   domain: string;
   documentId: string;
   alt: string;
-  /** Base64 data URI. No remote URLs are ever exposed here. */
-  dataUri: string;
+  /** Content-addressed store key. Preferred image source. */
+  key?: string;
+  /** Pending client upload hash. Shown as a placeholder until bytes arrive. */
+  hash?: string;
+  /** Legacy inline image. No remote URLs are ever exposed here. */
+  dataUri?: string;
+}
+
+export function imageSrc(item: Pick<ImageItem, 'key' | 'dataUri'>): string {
+  if (item.key) return `${base}/api/image?key=${encodeURIComponent(item.key)}`;
+  if (item.dataUri) return item.dataUri;
+  return '';
 }
 
 interface GalleryImage {
   alt?: string;
+  key?: string;
+  hash?: string;
   data_uri?: string;
 }
 
@@ -35,12 +47,31 @@ function parseGallery(metadata?: Record<string, unknown>): GalleryImage[] {
       (entry): entry is GalleryImage =>
         typeof entry === 'object' &&
         entry !== null &&
-        typeof (entry as GalleryImage).data_uri === 'string' &&
-        (entry as GalleryImage).data_uri!.startsWith('data:image/'),
+        (typeof (entry as GalleryImage).key === 'string' ||
+          typeof (entry as GalleryImage).hash === 'string' ||
+          (typeof (entry as GalleryImage).data_uri === 'string' &&
+            (entry as GalleryImage).data_uri!.startsWith('data:image/'))),
     );
   } catch {
     return [];
   }
+}
+
+/**
+ * Collapses byte-identical images from the same page into a single card.
+ * The same file is often referenced by several URLs (query-string variants,
+ * srcset/src duplicates), which URL-based dedupe at index time cannot catch.
+ * The full data URI participates in the key so `slice` tricks can never
+ * collide again; the first occurrence (with its alt text) wins.
+ */
+export function dedupeImageItems(items: ImageItem[]): ImageItem[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const key = `${item.pageUrl}\n${item.key ?? ''}\n${item.hash ?? ''}\n${item.dataUri ?? ''}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 /** Fetches indexed gallery images (one card per image) with source attribution. */
@@ -72,11 +103,15 @@ export async function fetchImages(limit = 200): Promise<ImageItem[]> {
         pageTitle: doc.title || doc.url,
         domain: doc.domain || doc.url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').split('/')[0],
         documentId: typeof doc.id === 'string' ? doc.id : '',
-        alt: img.alt || '',
-        dataUri: img.data_uri!,
+        alt: typeof img.alt === 'string' ? img.alt : '',
+        key: typeof img.key === 'string' ? img.key : undefined,
+        hash: typeof img.hash === 'string' ? img.hash : undefined,
+        dataUri:
+          typeof img.data_uri === 'string' && img.data_uri.startsWith('data:image/')
+            ? img.data_uri
+            : undefined,
       });
-      if (out.length >= limit) return out;
     }
   }
-  return out;
+  return dedupeImageItems(out).slice(0, limit);
 }

@@ -153,12 +153,73 @@ func TestPreviewGallery(t *testing.T) {
 	if res.Decision() != sdk.ExtractorSuccess {
 		t.Fatalf("expected success, got %v (%v)", res.Decision(), res.Err())
 	}
-	content := res.Response().Content
-	if strings.Contains(content, "<script>") {
-		t.Error("preview must sanitize alt text")
+	if res.Response().Template != "gallery" {
+		t.Errorf("template = %q, want gallery", res.Response().Template)
 	}
-	if !strings.Contains(content, "data:image/png;base64,") {
-		t.Error("preview must embed the data URI image")
+	var items []galleryPreviewItem
+	if err := json.Unmarshal([]byte(res.Response().Content), &items); err != nil {
+		t.Fatalf("preview content is not JSON: %v", err)
+	}
+	if len(items) != 1 || !strings.HasPrefix(items[0].DataURI, "data:image/png;base64,") {
+		t.Errorf("unexpected preview items: %+v", items)
+	}
+}
+
+func TestPreviewGalleryKeys(t *testing.T) {
+	e := &ImagesExtractor{}
+	key := strings.Repeat("a", 64)
+	hash := strings.Repeat("b", 64)
+	raw, _ := json.Marshal([]imageEntry{
+		{Alt: "Stored", Key: key},
+		{Alt: "Pending", Hash: hash},
+		{Alt: "Bogus", Key: "not-a-key"},
+	})
+	d := &sdk.Document{
+		URL:      "https://example.com/",
+		Domain:   "example.com",
+		Metadata: map[string]any{"images": string(raw)},
+	}
+	res := e.Preview(d)
+	if res.Decision() != sdk.ExtractorSuccess {
+		t.Fatalf("expected success, got %v (%v)", res.Decision(), res.Err())
+	}
+	var items []galleryPreviewItem
+	if err := json.Unmarshal([]byte(res.Response().Content), &items); err != nil {
+		t.Fatalf("preview content is not JSON: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected key and hash entries, got %+v", items)
+	}
+	if items[0].Key != key || items[1].Hash != hash {
+		t.Errorf("unexpected preview items: %+v", items)
+	}
+}
+
+func TestClientGalleryAcceptsKeysAndHashes(t *testing.T) {
+	e := &ImagesExtractor{}
+	key := strings.Repeat("a", 64)
+	hash := strings.Repeat("b", 64)
+	raw, _ := json.Marshal([]imageEntry{
+		{Alt: "Stored", Key: key},
+		{Alt: "Pending", Hash: hash},
+		{Alt: "Bogus", Key: "xyz", Hash: "xyz"},
+	})
+	d := &sdk.Document{
+		URL:      "https://example.com/",
+		Domain:   "example.com",
+		HTML:     "<html><body>no images here</body></html>",
+		Metadata: map[string]any{"images": string(raw)},
+	}
+	if res := e.Extract(d); res.Decision() != sdk.ExtractorSuccess {
+		t.Fatalf("expected success, got %v (%v)", res.Decision(), res.Err())
+	}
+	stored, _ := d.Metadata["images"].(string)
+	var entries []imageEntry
+	if err := json.Unmarshal([]byte(stored), &entries); err != nil {
+		t.Fatalf("metadata is not valid JSON: %v", err)
+	}
+	if len(entries) != 2 || entries[0].Key != key || entries[1].Hash != hash {
+		t.Errorf("unexpected normalized gallery: %+v", entries)
 	}
 }
 
@@ -237,6 +298,39 @@ func TestExtractRejectsInvalidClientGallery(t *testing.T) {
 		if res := e.Extract(d); res.Decision() != sdk.ExtractorFallback {
 			t.Errorf("%s: expected fallback, got %v", name, res.Decision())
 		}
+	}
+}
+
+func TestNoImageCountCapByDefault(t *testing.T) {
+	e := &ImagesExtractor{}
+	if e.maxImages() != 0 {
+		t.Fatalf("default max_images = %d, want 0 (unlimited)", e.maxImages())
+	}
+	var sb strings.Builder
+	sb.WriteString("<html><body>")
+	for i := range 25 {
+		fmt.Fprintf(&sb, `<img src="/img%d.jpg" alt="I%d">`, i, i)
+	}
+	sb.WriteString("</body></html>")
+	if got := collectImageCandidates(sb.String(), "https://example.com/", e.maxImages()); len(got) != 25 {
+		t.Fatalf("expected 25 candidates without cap, got %d", len(got))
+	}
+	uri := "data:image/png;base64," + base64.StdEncoding.EncodeToString(tinyPNG)
+	entries := make([]imageEntry, 0, 25)
+	for i := range 25 {
+		entries = append(entries, imageEntry{Alt: fmt.Sprintf("I%d", i), DataURI: uri})
+	}
+	raw, _ := json.Marshal(entries)
+	d := &sdk.Document{
+		URL:      "https://example.com/page",
+		Domain:   "example.com",
+		Metadata: map[string]any{"images": string(raw)},
+	}
+	if res := e.ExtractContext(context.Background(), d); res.Decision() != sdk.ExtractorSuccess {
+		t.Fatalf("Extract decision = %v, err = %v", res.Decision(), res.Err())
+	}
+	if n, _ := d.Metadata["image_count"].(int); n != 25 {
+		t.Errorf("expected image_count 25, got %v", d.Metadata["image_count"])
 	}
 }
 
