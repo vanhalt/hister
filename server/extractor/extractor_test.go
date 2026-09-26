@@ -201,6 +201,10 @@ func TestRegisteredExtractorCapabilities(t *testing.T) {
 			if caps.Enrich || caps.Extract || !caps.Preview {
 				t.Errorf("%s capabilities = %+v, want preview only", candidate.Name(), caps)
 			}
+		case "Images":
+			if !caps.Enrich || caps.Extract || !caps.Preview {
+				t.Errorf("%s capabilities = %+v, want enrich and preview", candidate.Name(), caps)
+			}
 		default:
 			if caps.Enrich || !caps.Extract || !caps.Preview {
 				t.Errorf("%s capabilities = %+v, want content and preview", candidate.Name(), caps)
@@ -222,6 +226,7 @@ func TestDefaultRegistryOrder(t *testing.T) {
 		"GitHub",
 		"Lobsters",
 		"HackerNews",
+		"Images",
 		"Wikipedia",
 		"Mastodon",
 		"Bluesky",
