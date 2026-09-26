@@ -931,6 +931,73 @@ func init() {
 			},
 		},
 		{
+			Name:         "Image",
+			Path:         "/api/image",
+			Method:       GET,
+			CSRFRequired: false,
+			Public:       true,
+			Handler:      serveStoredImage,
+			Description:  "Serve a stored gallery image by content key",
+			Args: []*EndpointArg{
+				{
+					Name:        "key",
+					Type:        "string",
+					Required:    true,
+					Description: "SHA-256 content key of the stored image",
+				},
+			},
+		},
+		{
+			Name:         "Upload image",
+			Path:         "/api/image",
+			Method:       POST,
+			CSRFRequired: true,
+			Handler:      serveImageUpload,
+			Description:  "Store one gallery image and merge its key into the owning document's gallery",
+			JSONSchema: []*JSONSchemaField{
+				{
+					Name:        "url",
+					Type:        "string",
+					Required:    true,
+					Description: "URL of the page the image was extracted from",
+				},
+				{
+					Name:        "alt",
+					Type:        "string",
+					Required:    false,
+					Description: "Alt text of the image",
+				},
+				{
+					Name:        "hash",
+					Type:        "string",
+					Required:    false,
+					Description: "Client computed SHA-256 of the raw image bytes",
+				},
+				{
+					Name:        "data_uri",
+					Type:        "string",
+					Required:    true,
+					Description: "Base64 image data URI",
+				},
+			},
+		},
+		{
+			Name:         "Missing images",
+			Path:         "/api/image/needed",
+			Method:       POST,
+			CSRFRequired: true,
+			Handler:      serveImageNeeded,
+			Description:  "Report which image content hashes are absent from the store",
+			JSONSchema: []*JSONSchemaField{
+				{
+					Name:        "hashes",
+					Type:        "array",
+					Required:    true,
+					Description: "SHA-256 content hashes to check",
+				},
+			},
+		},
+		{
 			Name:         "File",
 			Path:         "/api/file",
 			Method:       GET,

@@ -18,10 +18,11 @@ const (
 	dataDirName   = "data"
 	htmlSubdir    = "html"
 	faviconSubdir = "favicon"
+	imageSubdir   = "image"
 )
 
-// dataStore manages the content-addressed file-system store for HTML and
-// favicon data. A fixed pool of 256 per-shard RWMutexes (indexed by the first
+// dataStore manages the content-addressed file-system store for HTML,
+// favicon, and gallery image data. A fixed pool of 256 per-shard RWMutexes (indexed by the first
 // byte of the SHA-256 key) serialises concurrent operations on files in the
 // same shard while allowing fully parallel access across different shards.
 //
@@ -76,6 +77,18 @@ func (ds *dataStore) write(subdir string, data []byte) (string, error) {
 		return "", err
 	}
 	return key, nil
+}
+
+// has reports whether the store already holds key without reading it.
+func (ds *dataStore) has(subdir, key string) bool {
+	if len(key) == 0 {
+		return false
+	}
+	mu := ds.shard(key)
+	mu.RLock()
+	defer mu.RUnlock()
+	_, err := os.Stat(dataFilePath(ds.dir, subdir, key))
+	return err == nil
 }
 
 // read decompresses and returns the data file identified by key. Acquires a

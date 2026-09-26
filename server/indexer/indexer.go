@@ -253,8 +253,10 @@ type documentWritePlan struct {
 	staleIndexes   []bleve.Index
 	oldHTMLKeys    []string
 	oldFaviconKeys []string
+	oldImageKeys   []string
 	newHTMLKey     string
 	newFaviconKey  string
+	newImageKeys   []string
 	needsEmbedding bool
 }
 
@@ -276,6 +278,7 @@ type storedDocumentState struct {
 	ignoreSkipRules bool
 	htmlKeys        []string
 	faviconKeys     []string
+	imageKeys       []string
 	texts           []string
 	indexNames      map[string]struct{}
 	addCount        uint
@@ -293,6 +296,7 @@ type MultiBatch struct {
 	batches             map[string]*indexBatch
 	orphanedHTMLKeys    []string
 	orphanedFaviconKeys []string
+	orphanedImageKeys   []string
 	embeddingIDs        map[string]struct{}
 	deletedIDs          map[string]struct{}
 	incrementAddCount   bool
@@ -933,6 +937,9 @@ func (idx *Indexer) reindex(ctx context.Context, basePath string, rules *config.
 	if _, err := idx.data.cleanup("favicon_key", faviconSubdir, idx.countKeyRefs); err != nil {
 		log.Warn().Err(err).Msg("failed to clean up orphaned favicon data files")
 	}
+	if _, err := idx.data.cleanup("image_keys", imageSubdir, idx.countKeyRefs); err != nil {
+		log.Warn().Err(err).Msg("failed to clean up orphaned image data files")
+	}
 	return nil
 }
 
@@ -975,6 +982,9 @@ func (i *Indexer) CleanupDataFiles() (int, int, error) {
 	faviconRemoved, err := i.data.cleanup("favicon_key", faviconSubdir, i.countKeyRefs)
 	if err != nil {
 		return htmlRemoved, faviconRemoved, fmt.Errorf("failed to clean up orphaned favicon data files: %w", err)
+	}
+	if _, err := i.data.cleanup("image_keys", imageSubdir, i.countKeyRefs); err != nil {
+		return htmlRemoved, faviconRemoved, fmt.Errorf("failed to clean up orphaned image data files: %w", err)
 	}
 	return htmlRemoved, faviconRemoved, nil
 }
@@ -1341,8 +1351,10 @@ func (i *Indexer) prepareStorageWrite(d *document.Document, state storedDocument
 	}
 	plan.oldHTMLKeys = state.htmlKeys
 	plan.oldFaviconKeys = state.faviconKeys
+	plan.oldImageKeys = state.imageKeys
 	plan.newHTMLKey = d.HTMLKey
 	plan.newFaviconKey = d.FaviconKey
+	plan.newImageKeys = d.ImageKeys
 	plan.target = i.getOrCreate(d.Language)
 	for name := range existingIndexes {
 		if name == plan.target.Name() {
@@ -1368,6 +1380,7 @@ func (i *Indexer) applyDocumentWrite(d *document.Document, plan documentWritePla
 		}
 	}
 	i.cleanupDataKeys(plan.oldHTMLKeys, plan.newHTMLKey, plan.oldFaviconKeys, plan.newFaviconKey)
+	i.cleanupImageKeys(plan.oldImageKeys, plan.newImageKeys)
 	if plan.needsEmbedding {
 		if err := i.enqueueEmbedding(d.ID()); err != nil {
 			return fmt.Errorf("enqueue embedding: %w", err)
@@ -1389,6 +1402,25 @@ func (i *Indexer) cleanupDataKeys(oldHTMLKeys []string, newHTMLKey string, oldFa
 	}
 }
 
+// cleanupImageKeys removes image blobs that were replaced and are no longer
+// referenced by any document.
+func (i *Indexer) cleanupImageKeys(oldKeys, newKeys []string) {
+	keep := make(map[string]struct{}, len(newKeys))
+	for _, key := range newKeys {
+		if key != "" {
+			keep[key] = struct{}{}
+		}
+	}
+	for _, key := range oldKeys {
+		if key == "" {
+			continue
+		}
+		if _, ok := keep[key]; !ok {
+			i.data.deleteIfOrphaned("image_keys", imageSubdir, key, i.countKeyRefs)
+		}
+	}
+}
+
 // getStoredDocumentState fetches the fields needed to update an existing
 // document. The same document can appear in more than one index when its
 // detected language changes between additions.
@@ -1396,7 +1428,7 @@ func (i *Indexer) getStoredDocumentState(id string) storedDocumentState {
 	var state storedDocumentState
 	q := bleve.NewDocIDQuery([]string{id})
 	req := bleve.NewSearchRequest(q)
-	req.Fields = []string{"html_key", "favicon_key", "language", "add_count", "label", "added", "metadata." + document.MetadataIgnoreSkipRules}
+	req.Fields = []string{"html_key", "favicon_key", "image_keys", "language", "add_count", "label", "added", "metadata." + document.MetadataIgnoreSkipRules}
 	if i.embedder != nil && i.vectorStore != nil {
 		req.Fields = append(req.Fields, "text")
 	}
@@ -1409,6 +1441,7 @@ func (i *Indexer) getStoredDocumentState(id string) storedDocumentState {
 	}
 	seenHTML := make(map[string]struct{})
 	seenFav := make(map[string]struct{})
+	seenImg := make(map[string]struct{})
 	seenText := make(map[string]struct{})
 	state.indexNames = make(map[string]struct{})
 	if len(res.Hits) < 1 {
@@ -1456,13 +1489,14 @@ func (i *Indexer) getStoredDocumentState(id string) storedDocumentState {
 				seenFav[k] = struct{}{}
 			}
 		}
+		appendImageKeyRefs(h.Fields["image_keys"], &state.imageKeys, seenImg)
 	}
 	return state
 }
 
-func (i *Indexer) getDocKeysByID(id string) (htmlKeys, faviconKeys []string) {
+func (i *Indexer) getDocKeysByID(id string) (htmlKeys, faviconKeys, imageKeys []string) {
 	state := i.getStoredDocumentState(id)
-	return state.htmlKeys, state.faviconKeys
+	return state.htmlKeys, state.faviconKeys, state.imageKeys
 }
 
 // countKeyRefs returns the number of indexed documents that reference the
@@ -1511,6 +1545,13 @@ func (i *Indexer) prepareForStorage(d *document.Document) error {
 	}
 	if d.FaviconKey != "" {
 		d.Favicon = ""
+	}
+	// Gallery data URIs (fresh downloads, client submissions, or legacy
+	// inline galleries) are content-addressed here so large images never
+	// land inside the Bleve index; d.ImageKeys mirrors the key set for
+	// reference counting.
+	if err := i.storeGalleryDataURIs(d); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1719,11 +1760,16 @@ func (b *MultiBatch) applyDocumentWrite(d *document.Document, plan documentWrite
 			b.orphanedFaviconKeys = append(b.orphanedFaviconKeys, key)
 		}
 	}
+	for _, key := range plan.oldImageKeys {
+		if key != "" && !slices.Contains(plan.newImageKeys, key) {
+			b.orphanedImageKeys = append(b.orphanedImageKeys, key)
+		}
+	}
 	return nil
 }
 
 func (b *MultiBatch) Delete(id string) {
-	oldHTMLKeys, oldFaviconKeys := b.indexer.getDocKeysByID(id)
+	oldHTMLKeys, oldFaviconKeys, oldImageKeys := b.indexer.getDocKeysByID(id)
 	delete(b.embeddingIDs, id)
 	b.deletedIDs[id] = struct{}{}
 	for name, idx := range b.indexer.indexes() {
@@ -1731,6 +1777,7 @@ func (b *MultiBatch) Delete(id string) {
 	}
 	b.orphanedHTMLKeys = append(b.orphanedHTMLKeys, oldHTMLKeys...)
 	b.orphanedFaviconKeys = append(b.orphanedFaviconKeys, oldFaviconKeys...)
+	b.orphanedImageKeys = append(b.orphanedImageKeys, oldImageKeys...)
 }
 
 func (b *MultiBatch) Save() error {
@@ -1747,6 +1794,7 @@ func (b *MultiBatch) Save() error {
 		}
 	}
 	b.indexer.cleanupDataKeys(b.orphanedHTMLKeys, "", b.orphanedFaviconKeys, "")
+	b.indexer.cleanupImageKeys(b.orphanedImageKeys, nil)
 	for id := range b.deletedIDs {
 		if err := b.indexer.cancelEmbedding(id); err != nil {
 			log.Warn().Err(err).Str("id", id).Msg("failed to cancel embedding job")
@@ -1766,7 +1814,7 @@ func (b *MultiBatch) Save() error {
 }
 
 func (i *Indexer) Delete(id string) error {
-	htmlKeys, faviconKeys := i.getDocKeysByID(id)
+	htmlKeys, faviconKeys, imageKeys := i.getDocKeysByID(id)
 	for _, idx := range i.indexes() {
 		if err := idx.Delete(id); err != nil {
 			return err
@@ -1785,6 +1833,9 @@ func (i *Indexer) Delete(id string) error {
 	}
 	for _, k := range faviconKeys {
 		i.data.deleteIfOrphaned("favicon_key", faviconSubdir, k, i.countKeyRefs)
+	}
+	for _, k := range imageKeys {
+		i.data.deleteIfOrphaned("image_keys", imageSubdir, k, i.countKeyRefs)
 	}
 	return nil
 }
@@ -2172,6 +2223,18 @@ func (idx *Indexer) resFromHit(h *search.DocumentMatch, include resultInclude) *
 	if s, ok := h.Fields["favicon_key"].(string); ok {
 		d.FaviconKey = s
 	}
+	switch v := h.Fields["image_keys"].(type) {
+	case []any:
+		for _, item := range v {
+			if s, ok := item.(string); ok && s != "" {
+				d.ImageKeys = append(d.ImageKeys, s)
+			}
+		}
+	case string:
+		if v != "" {
+			d.ImageKeys = []string{v}
+		}
+	}
 	if include.has(resultIncludeHTML) {
 		if d.HTMLKey != "" {
 			data, err := idx.data.read(htmlSubdir, d.HTMLKey)
@@ -2368,6 +2431,7 @@ func createMapping(lang string, keepStopwords bool) mapping.IndexMapping {
 	docMapping.AddFieldMappingsAt("language", um)
 	docMapping.AddFieldMappingsAt("favicon", noIdxMap)
 	docMapping.AddFieldMappingsAt("favicon_key", um)
+	docMapping.AddFieldMappingsAt("image_keys", um)
 	docMapping.AddFieldMappingsAt("html", noIdxMap)
 	docMapping.AddFieldMappingsAt("html_key", um)
 	docMapping.AddFieldMappingsAt("metadata", noIdxMap)

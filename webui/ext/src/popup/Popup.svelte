@@ -19,6 +19,7 @@
   let customHeaders: { name: string; value: string }[] = $state([]);
   let indexingEnabled = $state(true);
   let showIndexedBadge = $state(false);
+  let sendGalleryImages = $state(true);
   let submitPublicDocuments = $state(false);
   let profileUserID = $state(0);
   let message = $state('');
@@ -99,6 +100,7 @@
       'indexingEnabled',
       'histerLabel',
       'showIndexedBadge',
+      'sendGalleryImages',
       'submitPublicDocuments',
       'histerProfileUserID',
     ],
@@ -111,6 +113,7 @@
       customHeaders = Array.isArray(data['histerCustomHeaders']) ? data['histerCustomHeaders'] : [];
       indexingEnabled = data['indexingEnabled'] !== false;
       showIndexedBadge = data['showIndexedBadge'] === true;
+      sendGalleryImages = data['sendGalleryImages'] !== false;
       submitPublicDocuments = data['submitPublicDocuments'] === true;
       profileUserID = Number(data['histerProfileUserID'] ?? 0);
       pageLabel = data['histerLabel'] || '';
@@ -232,6 +235,10 @@
 
   function toggleShowIndexedBadge() {
     chrome.storage.local.set({ showIndexedBadge: showIndexedBadge });
+  }
+
+  function toggleSendGalleryImages() {
+    chrome.storage.local.set({ sendGalleryImages: sendGalleryImages });
   }
 
   function toggleSubmitPublicDocuments() {
@@ -378,6 +385,20 @@
               id="show-indexed-badge"
               bind:checked={showIndexedBadge}
               onCheckedChange={toggleShowIndexedBadge}
+            />
+          </div>
+
+          <div class="flex items-center justify-between">
+            <Label
+              for="send-gallery-images"
+              class="font-outfit text-text-brand cursor-pointer text-sm font-bold"
+            >
+              Send page images for indexing
+            </Label>
+            <Switch
+              id="send-gallery-images"
+              bind:checked={sendGalleryImages}
+              onCheckedChange={toggleSendGalleryImages}
             />
           </div>
 

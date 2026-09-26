@@ -163,7 +163,7 @@ func buildHTMLPolicy(trusted bool) *bluemonday.Policy {
 	p.AllowImages()
 	p.AllowTables()
 	p.RequireNoFollowOnLinks(false)
-	p.AllowURLSchemes("mailto", "http", "https")
+	p.AllowURLSchemes("mailto", "tel", "http", "https")
 	if trusted {
 		p.AllowStyles(trustedLayoutStyles...).Globally()
 	}

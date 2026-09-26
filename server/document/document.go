@@ -36,6 +36,10 @@ type Document struct {
 	Text       string         `json:"text"`
 	Favicon    string         `json:"favicon"`
 	FaviconKey string         `json:"favicon_key"`
+	// ImageKeys holds content-addressed keys for gallery images stored under
+	// the indexer's image data subdir. It mirrors the gallery manifest in
+	// Metadata["images"] so orphaned blobs can be reference counted.
+	ImageKeys []string       `json:"image_keys,omitempty"`
 	Score      float64        `json:"score"`
 	Added      int64          `json:"added"`
 	Updated    int64          `json:"updated"`
@@ -372,6 +376,12 @@ func (d *Document) GetPreviewMeta() map[string]any {
 		var vids []map[string]any
 		if err := json.Unmarshal([]byte(raw), &vids); err == nil && len(vids) > 0 {
 			meta["videos"] = vids
+		}
+	}
+	if raw, ok := d.Metadata["contacts"].(string); ok && raw != "" {
+		var contacts map[string]any
+		if err := json.Unmarshal([]byte(raw), &contacts); err == nil && len(contacts) > 0 {
+			meta["contacts"] = contacts
 		}
 	}
 	if len(meta) == 0 {

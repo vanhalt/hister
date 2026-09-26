@@ -1,6 +1,8 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 <script lang="ts">
   import VideoPreview from './VideoPreview.svelte';
+  import ContactPreview from './ContactPreview.svelte';
+  import GalleryPreview, { type GalleryPreviewItem } from './GalleryPreview.svelte';
   import { apiFetch } from '$lib/api';
   import {
     buildPreviewUrl,
@@ -11,6 +13,7 @@
   import type {
     DocumentPreviewResponse,
     DocumentVersion,
+    ContactInfo,
     EmbeddedVideo,
     PreviewDocumentDetails,
     PreviewMetadata,
@@ -28,6 +31,7 @@
     ExternalLink,
     Info,
     Video,
+    Mail,
   } from '@lucide/svelte';
   import { onMount, untrack } from 'svelte';
 
@@ -74,6 +78,7 @@
   let extractorsLoading = $state(false);
 
   let showEmbeddedVideos = $state(false);
+  let showContacts = $state(true);
   let showDocumentDetails = $state(false);
 
   type DetailEntry = { field: string; value: unknown };
@@ -94,6 +99,21 @@
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([key, value]) => ({ field: `metadata.${key}`, value })),
   );
+
+  let contactCount = $derived.by((): number => {
+    const c = meta?.contacts as ContactInfo | undefined;
+    if (!c) return 0;
+    return (
+      (c.emails?.length ?? 0) +
+      (c.phones?.length ?? 0) +
+      (c.whatsapp?.length ?? 0) +
+      (c.socials?.length ?? 0) +
+      (c.ruts?.length ?? 0) +
+      (c.addresses?.length ?? 0) +
+      (c.hours?.length ?? 0) +
+      (c.links?.length ?? 0)
+    );
+  });
 
   onMount(() => {
     showDocumentDetails = getStoredPreviewDetailsOpen();
@@ -198,6 +218,7 @@
     templateData = null;
     documentDetails = null;
     showEmbeddedVideos = false;
+    showContacts = true;
     showVersions = false;
     viewingVersion = null;
     if (versionId === null) {
@@ -218,8 +239,12 @@
       } else {
         const data = (await resp.json()) as DocumentPreviewResponse;
         template = data.template || '';
-        templateData = template === 'video' ? parseTemplateData(data.content) : null;
-        content = template === 'video' ? '' : data.content || '<p>No content available</p>';
+        templateData =
+          template === 'video' || template === 'gallery' ? parseTemplateData(data.content) : null;
+        content =
+          template === 'video' || template === 'gallery'
+            ? ''
+            : data.content || '<p>No content available</p>';
         // Always update metadata (server always returns current doc's metadata regardless of version).
         title = data.title || hint;
         added = data.added ?? null;
@@ -476,6 +501,17 @@
           {meta.videos.length === 1 ? 'video' : 'videos'}
         </button>
       {/if}
+      {#if contactCount > 0}
+        <button
+          onclick={() => (showContacts = !showContacts)}
+          class="font-inter mt-1 inline-flex cursor-pointer items-center gap-1.5 text-xs {showContacts
+            ? 'text-hister-teal'
+            : 'text-text-brand-muted hover:text-text-brand'}"
+        >
+          <Mail class="size-3.5 shrink-0" />
+          {showContacts ? 'Hide' : 'Show'} contacts ({contactCount})
+        </button>
+      {/if}
       {#if showDocumentDetails && documentDetails}
         <div
           id="preview-document-details"
@@ -639,8 +675,15 @@
               {/each}
             </div>
           {/if}
+          {#if contactCount > 0 && showContacts}
+            <div class="not-prose border-border-brand-muted mb-6 border-b pb-4">
+              <ContactPreview contacts={meta?.contacts as ContactInfo} />
+            </div>
+          {/if}
           {#if template === 'video' && templateData}
             <VideoPreview data={templateData} />
+          {:else if template === 'gallery' && Array.isArray(templateData)}
+            <GalleryPreview items={templateData as GalleryPreviewItem[]} />
           {:else}
             {@html content}
           {/if}
