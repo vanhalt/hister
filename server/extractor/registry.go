@@ -11,6 +11,7 @@ import (
 	"github.com/asciimoo/hister/config"
 	"github.com/asciimoo/hister/server/extractor/extractors/bluesky"
 	"github.com/asciimoo/hister/server/extractor/extractors/chatgpt"
+	"github.com/asciimoo/hister/server/extractor/extractors/contact"
 	"github.com/asciimoo/hister/server/extractor/extractors/discourse"
 	"github.com/asciimoo/hister/server/extractor/extractors/embeddedvideo"
 	"github.com/asciimoo/hister/server/extractor/extractors/github"
@@ -60,6 +61,7 @@ func DefaultExtractors() []Extractor {
 		&embeddedvideo.EmbeddedVideoExtractor{},
 		&discourse.DiscourseExtractor{},
 		&jsonld.JSONLDExtractor{},
+		&contact.ContactExtractor{},
 		&reddit.RedditExtractor{},
 		&stackexchange.StackExchangeExtractor{},
 		&godoc.GoDocExtractor{},

@@ -743,6 +743,11 @@ func mcpPreviewMetadata(meta map[string]any) map[string]any {
 		}
 		result["videos"] = normalized
 	}
+	if contacts, ok := meta["contacts"].(map[string]any); ok && len(contacts) > 0 {
+		if raw, err := json.Marshal(contacts); err == nil {
+			result["contacts_json"] = mcpNormalizeUntrusted(string(raw))
+		}
+	}
 	return result
 }
 

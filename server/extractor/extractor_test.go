@@ -193,7 +193,7 @@ func TestRegisteredExtractorCapabilities(t *testing.T) {
 		}
 
 		switch candidate.Name() {
-		case "EmbeddedVideo", "JSONLD":
+		case "EmbeddedVideo", "JSONLD", "Contact":
 			if !caps.Enrich || caps.Extract || caps.Preview {
 				t.Errorf("%s capabilities = %+v, want enrichment only", candidate.Name(), caps)
 			}
@@ -216,6 +216,7 @@ func TestDefaultRegistryOrder(t *testing.T) {
 		"EmbeddedVideo",
 		"Discourse",
 		"JSONLD",
+		"Contact",
 		"Reddit",
 		"StackExchange",
 		"GoDoc",

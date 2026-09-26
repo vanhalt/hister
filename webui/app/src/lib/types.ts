@@ -25,6 +25,61 @@ export interface EmbeddedVideo {
   mime?: string;
 }
 
+export interface ContactEmail {
+  value: string;
+  source: string;
+  confidence: string;
+  obfuscated?: boolean;
+}
+
+export interface ContactPhone {
+  value: string;
+  normalized?: string;
+  source: string;
+  confidence: string;
+}
+
+export interface ContactSocial {
+  network: string;
+  url: string;
+  handle?: string;
+}
+
+export interface ContactRut {
+  value: string;
+  normalized?: string;
+  source: string;
+  confidence: string;
+}
+
+export interface ContactAddress {
+  value: string;
+  source: string;
+  confidence: string;
+}
+
+export interface ContactHours {
+  value: string;
+  source: string;
+  confidence: string;
+}
+
+export interface ContactLink {
+  kind: string;
+  url: string;
+}
+
+export interface ContactInfo {
+  emails: ContactEmail[];
+  phones: ContactPhone[];
+  whatsapp: ContactPhone[];
+  socials: ContactSocial[];
+  ruts?: ContactRut[];
+  addresses?: ContactAddress[];
+  hours?: ContactHours[];
+  links?: ContactLink[];
+}
+
 export interface PreviewMetadata extends Record<string, unknown> {
   author?: string;
   published?: string;
@@ -32,6 +87,7 @@ export interface PreviewMetadata extends Record<string, unknown> {
   description?: string;
   videos?: EmbeddedVideo[];
   jsonld?: unknown[];
+  contacts?: ContactInfo;
 }
 
 export interface PreviewDocumentDetails {
